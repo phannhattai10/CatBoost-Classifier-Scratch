@@ -1,0 +1,250 @@
+# A.1 AI Prompting cho CatBoost Classifier
+
+> **Công cụ sử dụng:** Antigravity IDE với model Claude Sonnet 4.6  
+> **Mục tiêu:** Xây dựng lại project Telco Customer Churn dùng CatBoost tự cài đặt (from scratch) đạt 70–90% tương đồng với source gốc.  
+> **Dataset:** Telco Customer Churn (Kaggle / IBM Watson) — 7,043 dòng × 21 cột.
+
+---
+
+## A.1.1 Prompt xây dựng chương trình
+
+**Prompt 1:**
+> "Tạo cấu trúc thư mục cho project Machine Learning dự đoán khách hàng viễn thông rời bỏ dịch vụ (Telco Customer Churn) sử dụng CatBoost tự cài đặt từ đầu bằng NumPy và Pandas (không dùng scikit-learn trong pipeline chính). Cần các thư mục: `data/raw/`, `data/processed/`, `notebooks/`, `src/catboost_scratch/`, `reports/figures/`, `models/`. Tạo file `README.md` mô tả mục tiêu: bài toán phân loại nhị phân Churn=Yes/No, dataset 7043 dòng 21 cột, ràng buộc không dùng sklearn, tập test luôn là tập thô chưa encode, áp dụng data leakage prevention."
+
+---
+
+**Prompt 2:**
+> "Tạo file `src/preprocessing.py` chỉ dùng NumPy, Pandas, pickle, pathlib. Viết các hàm xử lý dữ liệu cho dataset Telco Customer Churn:
+>
+> 1. `clean_total_charges(df)` — convert cột TotalCharges từ object sang float, fillna(0.0).
+> 2. `clean_target_column(df, target_col='Churn')` — map các biến thể yes/no/true/false/0/1/Y/N → 'Yes'/'No', in bảng thống kê trước/sau.
+> 3. `_clean_senior_citizen(df)` — convert SeniorCitizen về int {0,1} dùng dict mapping; giá trị không nhận diện được → NaN (dùng Int64 hỗ trợ NaN).
+> 4. `_standardize_categorical_labels(df)` — (a) strip khoảng trắng, (b) placeholder 'unknown'/'nan'/'none'/'null'/'na'/'n/a'/'' → NaN, (c) BẢO TỒN 'No internet service' và 'No phone service' không map sang 'No', (d) explicit map cho gender/Contract/PaymentMethod, (e) tự động detect cột boolean-like rồi map yes/no → Yes/No.
+> 5. `_invalidate_impossible_numeric_values(df)` — tenure ngoài [0,100], MonthlyCharges ngoài [0,150], TotalCharges âm → NaN; in log số dòng bị invalidate.
+> 6. `clean_raw_data(df, drop_customer_id=True, target_col='Churn')` — pipeline 8 bước: dedup → drop customerID → strip → placeholder→NaN → _clean_senior_citizen → _standardize_categorical_labels → auto convert numeric → invalidate phi lý → clean_total_charges.
+> 7. `resolve_duplicate_customer_ids(df)` — cùng customerID, giữ bản ghi ít NaN nhất trong [tenure, MonthlyCharges, TotalCharges].
+> 8. `get_feature_lists(df, target_col, exclude_cols)` → (num_cols, cat_cols) theo dtype.
+> 9. `fit_missing_value_params(train_df, num_cols)` — fit median mỗi cột số trên train.
+> 10. `fill_missing_values(df, fill_params)` — fill NaN bằng median đã fit.
+> 11. `fit_target_statistics(train_df, cat_cols, target_col, smoothing=1.0)` — tính static Target Statistics: TS(c) = (n_pos(c) + smoothing × global_mean) / (n_total(c) + smoothing).
+> 12. `transform_with_target_statistics(df, ts_params, cat_cols)` — áp TS tĩnh, unseen → global_mean.
+> 13. `engineer_features(df)` — tạo: tenure_group (bins [-0.1,6,12,24,36,48,60,100]), num_addon_services (đếm 'Yes' trong 6 cột addon), avg_monthly_spend = TotalCharges/tenure fallback MonthlyCharges khi tenure=0.
+> 14. `fit_preprocessing_params(train_df, target_col='Churn', smoothing=1.0)` — gọi toàn bộ fit functions, trả về dict.
+> 15. `transform(df, params)` — clean_total_charges → fill num → GIỮ NGUYÊN cat dạng string thô (không encode) → trả về (X, y).
+> 16. `save_params` và `load_params` dùng pickle."
+
+---
+
+**Prompt 3:**
+> "Tạo notebook `notebooks/01_split.ipynb`. Dataset Telco Customer Churn có 7043 dòng × 21 cột gồm customerID, gender, SeniorCitizen (0/1), Partner, Dependents, tenure, PhoneService, MultipleLines, InternetService, OnlineSecurity, OnlineBackup, DeviceProtection, TechSupport, StreamingTV, StreamingMovies, Contract, PaperlessBilling, PaymentMethod, MonthlyCharges, TotalCharges, Churn.
+>
+> Notebook thực hiện:
+> 1. Load `data/raw/Telco_Customer_Churn.csv`, in shape và head(5).
+> 2. Gọi `clean_target_column(df, 'Churn')`, in phân phối trước/sau.
+> 3. Gọi `clean_raw_data(df, drop_customer_id=False)` — giữ customerID.
+> 4. Gọi `resolve_duplicate_customer_ids(df)`, rồi drop customerID.
+> 5. Assert không còn NaN trong TotalCharges.
+> 6. Tự cài hàm `stratified_split` bằng NumPy thuần (KHÔNG dùng sklearn): với mỗi class trong Churn, shuffle rồi chia theo tỷ lệ 80/20 (train / test). Lưu ý: tập val sẽ được split từ train tại notebook 04/05 khi cần huấn luyện mô hình.
+> 7. In bảng Churn=Yes/No% cho FULL/TRAIN/TEST — xác nhận tỷ lệ Churn=Yes đạt ~26.5% đồng đều ở cả 2 tập.
+> 8. Lưu `data/processed/train_raw.csv` (5.638 dòng) và `data/processed/test_raw.csv` (1.410 dòng).
+>
+> **Lưu ý:** Sau khi lưu, test_raw.csv KHÔNG được mở lại trong notebook này hay notebook 02–03 (Data Leakage Prevention)."
+
+---
+
+**Prompt 4:**
+> "Tạo notebook `notebooks/02_eda.ipynb`. Chỉ load `data/processed/train_raw.csv` (không đọc val hay test). Thực hiện EDA và lưu figure vào `reports/figures/`:
+>
+> 1. Countplot Churn Yes/No, ghi tỷ lệ % → `countplot_churn_target.png`
+> 2. Heatmap missing values, in bảng % missing mỗi cột → `missing_heatmap.png`
+> 3. Histogram 3 cột tenure, MonthlyCharges, TotalCharges → `hist_numerical.png`
+> 4. Boxplot 3 cột số theo nhóm Churn → `boxplot_numerical.png`
+> 5. Subplot countplot tất cả cột categorical → `countplot_categorical.png`
+> 6. Bar chart churn rate theo từng giá trị của mỗi cột categorical, highlight màu đỏ giá trị có churn rate cao → `churn_rate_by_categorical.png`
+> 7. Heatmap Pearson correlation trên num_cols + SeniorCitizen, in top 5 tương quan với Churn → `heatmap_correlation.png`
+> 8. Scatter tenure vs TotalCharges màu theo Churn, tính r Pearson → `scatter_tenure_charges.png`
+> 9. Tạo tenure_group tạm, vẽ bar chart churn rate theo nhóm — nhóm 0-6 tháng phải ~47% → `tenure_group_analysis.png`
+> 10. Pivot table churn rate theo InternetService × từng sub-service → `heatmap_internetservice_subservices.png`
+>
+> Ghi insight định lượng dưới mỗi biểu đồ bằng markdown cell."
+
+---
+
+**Prompt 5:**
+> "Tạo notebook `notebooks/03_feature_engineering.ipynb`. Chỉ load `train_raw.csv` (không load test; val sẽ tách từ train ở notebook 04/05). Thực hiện:
+>
+> 1. Gọi `engineer_features(train_df)` tạo: `tenure_group`, `num_addon_services`, `avg_monthly_spend`.
+> 2. Gọi `fit_preprocessing_params(train_fe, target_col='Churn', smoothing=1.0)` — fit CHỈ trên train để chống data leakage.
+> 3. In params['num_cols'] (6 cột: SeniorCitizen, tenure, MonthlyCharges, TotalCharges, num_addon_services, avg_monthly_spend) và params['cat_cols'] (16 cột categorical bao gồm cả tenure_group).
+> 4. Gọi `transform(train_fe, params)` → X_train (5.638×22), y_train (5.638,).
+> 5. Assert X_train[num_cols] có 0 NaN và y_train chỉ gồm {0, 1}.
+> 6. Tính và in `scale_pos_weight = sum(y_train==0) / sum(y_train==1)` — phải ≈ 2.7687 (4.142 / 1.496).
+> 7. Vẽ bar chart top 10 feature tương quan với target dùng static TS → `feature_correlation_ts_baseline.png`.
+> 8. Lưu params vào `data/processed/preprocessing_params.pkl`."
+
+---
+
+**Prompt 6:**
+> "Tạo package `src/catboost_scratch/` với các file sau. Tất cả import nội bộ phải dùng relative import (from .xxx import).
+>
+> **`__init__.py`:** `from .model import CatBoost, CatBoostClassifier`
+>
+> **`config.py`:** Hằng số DEFAULT_N_ESTIMATORS=10, DEFAULT_LEARNING_RATE=0.1, DEFAULT_MAX_DEPTH=3, DEFAULT_ALPHA=1.0, DEFAULT_RANDOM_STATE=42, DEFAULT_CLASSIFIER_N_ESTIMATORS=50.
+>
+> **`metrics.py`:** Hàm `MSE(y_true, y_pred)`, `SSE(y)` (trả 0 nếu rỗng), `sigmoid(x)` (clip x vào [-500, 500]).
+>
+> **`permutation.py`:** Class `PermutationGenerator(random_state=42)` với method `generate(n_samples)` dùng `np.random.default_rng(self.random_state).permutation(n_samples)`.
+>
+> **`encoding.py`:** Class `OrderedTargetStatistics(alpha=1.0)`. `FitTransform(x, y)`: sinh permutation = np.random.permutation(len(x)), duyệt theo permutation, tại index gốc i tính TS = (sum_trước + alpha×prior)/(count_trước + alpha), LƯU kết quả tại i, RỒI MỚI cộng y[i] vào sum/count. `Transform(x)`: dùng bảng sum/count đã tích lũy, unseen → prior.
+>
+> **`oblivious_tree.py`:** Class `ObliviousTree(max_depth=3, max_borders=32)`. `Fit`: tại mỗi depth, tìm 1 cặp (feature, threshold) tốt nhất toàn cục bằng cách duyệt tất cả feature × tất cả midpoint threshold (dùng quantiles khi số unique > max_borders), tính tổng SSE trên TẤT CẢ lá hiện tại. `Predict`: tái dựng leaf_indices, tra leaf_value.
+>
+> **`boosting.py`:** 3 class — `GradientBoosting` (boosting chuẩn MSE), `OrderedBoosting` (boosting hồi quy có ordered prediction dùng running_sum/running_count theo permutation), `OrderedBoostingClassifier` (phân loại nhị phân: khởi tạo raw_prediction=log(p/(1-p)), gradient=y-sigmoid(raw), fit cây trên weighted_gradient có pos_weight, ordered_prediction theo running mean).
+>
+> **`model.py`:** `CatBoost` và `CatBoostClassifier` — mỗi class có `preprocessFit` (encode cat bằng OrderedTargetStatistics), `preprocessPredict` (Transform), `Fit`, `PredictProba`, `Predict(threshold=0.5)`. CatBoostClassifier hỗ trợ pos_weight='balanced' tự tính n_neg/n_pos."
+
+---
+
+**Prompt 7:**
+> "Tạo notebook `notebooks/04_train_model.ipynb`. Không dùng scikit-learn ở bất kỳ bước nào trong pipeline chính.
+>
+> 1. Load `train_raw.csv` và `test_raw.csv` từ `data/processed/`.
+> 2. Tách tập `val` từ `train` bằng `stratified_split(train_df, target_col='Churn', train_ratio=0.80, test_ratio=0.20, random_state=42)` → train (4.509 dòng), val (1.129 dòng), test (1.410 dòng).
+> 3. Load `preprocessing_params.pkl` (đã fit từ train ở notebook 03), gọi `engineer_features()` và `transform()` cho cả 3 tập.
+> 4. Lấy danh sách index các cột categorical: `cat_feature = [X_train.columns.get_loc(col) for col in params['cat_cols']]`.
+> 5. Convert sang numpy array.
+> 6. Import từ src và train: `from catboost_scratch import CatBoostClassifier; model = CatBoostClassifier(n_estimators=50, learning_rate=0.1, max_depth=3, alpha=1.0, random_state=42); model.Fit(x_train_np, y_train_np, cat_features=cat_feature)`.
+> 7. Tự cài bằng NumPy (không import sklearn): accuracy, precision, recall, f1_score, confusion_matrix, roc_auc_score.
+> 8. Đánh giá dự đoán trên tập val và test, in kết quả.
+> 9. Vẽ: Confusion Matrix heatmap, ROC Curve với AUC, Precision-Recall Curve, histogram phân phối xác suất dự đoán.
+> 10. Lưu model: `pickle.dump(model, open('models/catboost_model.pkl','wb'))`."
+
+---
+
+**Prompt 8:**
+> "Tạo notebook `notebooks/05_compare_with_catboost_lib.ipynb`. Notebook DUY NHẤT được phép dùng scikit-learn và thư viện CatBoost chính thức.
+>
+> 1. Load `train_raw.csv` và `test_raw.csv`, tách val từ train (stratified split 80/20) tương tự notebook 04, áp dụng `engineer_features` và `transform` với tham số từ `preprocessing_params.pkl`.
+> 2. Train model CatBoost chính thức: `from catboost import CatBoostClassifier as OfficialCatBoost; official_model = OfficialCatBoost(iterations=50, learning_rate=0.1, depth=3, random_seed=42, cat_features=cat_cols_names, verbose=0)`.
+> 3. Load model scratch từ models/catboost_model.pkl.
+> 4. Đánh giá cả 2 model trên val và test dùng sklearn.metrics: accuracy, precision, recall, f1, roc_auc.
+> 5. Tạo bảng so sánh song song 2 model trên từng metric.
+> 6. Vẽ ROC curve của cả 2 model trên cùng 1 biểu đồ.
+> 7. Nhận xét về sự khác biệt và giải thích nguyên nhân."
+
+---
+
+**Prompt 9:**
+> "Tạo 3 script Python độc lập trong `src/`:
+>
+> **`TrainModel.py`:** Load train_raw.csv → stratified_split 80/20 lấy val (tự cài, không dùng sklearn) → load preprocessing_params.pkl → engineer_features → transform → lấy cat_feature index → train CatBoostClassifier scratch (n_estimators=50) → predict trên val → tính metric bằng sklearn → in kết quả → lưu model vào `data/processed/catboost_model.pkl` → lưu dict {y_true, y_pred, y_prob} vào `data/processed/catboost_results.pkl`.
+>
+> **`FinalTest.py`:** Load preprocessing_params → load model pkl → engineer_features + transform cho test_raw.csv → predict → tính metric bằng sklearn → in kết quả.
+>
+> **`Visualize.py`:** Load catboost_results.pkl (y_true, y_pred, y_prob của val) → vẽ 5 biểu đồ bằng matplotlib: (1) Confusion Matrix heatmap, (2) ROC Curve với AUC, (3) Precision-Recall Curve, (4) Histogram phân phối xác suất No Churn vs Churn, (5) Bar chart 4 metric chính Accuracy/Precision/Recall/F1 → lưu vào reports/figures/ hoặc show."
+
+---
+
+**Prompt 10:**
+> "Tạo file `reports/data_pipeline_summary.md` báo cáo tổng quan pipeline. Gồm:
+>
+> - **Phần 0:** Bảng 3 ràng buộc đề bài (không sklearn / test là tập thô / chống leakage) và 3 giải pháp tương ứng.
+> - **Phần 1:** ASCII diagram: Telco_Customer_Churn.csv → 01_split → {train_raw.csv (80%), test_raw.csv (20%)} → 02_eda (chỉ train) → 03_feature_engineering (fit chỉ trên train) → preprocessing_params.pkl → 04_train_model (split val từ train tại đây) → model.pkl.
+> - **Phần 2:** Bảng chuẩn hóa nhãn Churn (9 biến thể → 2 nhãn chuẩn), số liệu dedup (18 full-dup + 47 sau chuẩn hóa + 30 resolve ID = 7048 còn lại), bảng invalidate numeric (tenure: 6 dòng, MonthlyCharges: 8 dòng).
+> - **Phần 3:** Bảng phân phối FULL (7.048 dòng) / TRAIN (5.638 dòng, 80%) / TEST (1.410 dòng, 20%) với số dòng, tỷ lệ và Churn Yes% (~26.5%). Ghi chú về việc tách Val (1.129 dòng) từ Train tại Notebook 04/05.
+> - **Phần 4:** 5 insight EDA có số liệu: (1) tenure r=-0.35 vs Churn, nhóm 0-6 tháng churn 47.3%; (2) OnlineSecurity=No → 41.6% churn vs Yes → 15.1%; (3) tenure–TotalCharges r=0.83; (4) class imbalance 3624:1309 ≈ 2.77:1; (5) outlier thực sự = 0.
+> - **Phần 5:** 3 feature mới (tenure_group, num_addon_services, avg_monthly_spend) với công thức, dtype, mục đích; 6 num_cols và 16 cat_cols; shape X_train (4933×22), scale_pos_weight=2.7685.
+> - **Phần 6:** 4 nguyên tắc chống data leakage: dedup trước split / fit chỉ trên train / test cô lập / transform là stateless."
+
+---
+
+## A.1.2 Prompt sửa lỗi và debug
+
+**Prompt 1:**
+> "Hàm `_standardize_categorical_labels` đang map 'No internet service' thành 'No', làm mất category nghiệp vụ quan trọng. Sửa lại để bảo toàn 'No internet service' và 'No phone service' như hai nhãn riêng biệt, không được merge vào 'No' dù logic boolean-like có nhận diện chúng."
+
+---
+
+**Prompt 2:**
+> "Khi chạy `transform()`, tôi gặp lỗi `KeyError: 'tenure_group'` vì cột này chưa có trong params['cat_cols'] — params được fit trước khi gọi `engineer_features()`. Sửa thứ tự trong notebook 03 để gọi `engineer_features()` TRƯỚC rồi mới gọi `fit_preprocessing_params()`, đảm bảo tenure_group và num_addon_services được đưa vào params."
+
+---
+
+**Prompt 3:**
+> "Script `TrainModel.py` đang import `from sklearn.metrics import accuracy_score, ...` — vi phạm ràng buộc không dùng sklearn trong pipeline chính. Tuy nhiên ở đây chỉ cần dùng sklearn cho bước in metric sau khi train, không phải pipeline ML chính, nên giữ nguyên nhưng tách rõ comment: '# Chỉ dùng sklearn cho evaluation, không dùng trong pipeline CatBoost'. Còn `FinalTest.py` cũng tương tự, ghi rõ sklearn chỉ để đánh giá kết quả cuối."
+
+---
+
+**Prompt 4:**
+> "Hàm `OrderedTargetStatistics.Transform()` cho kết quả sai với unseen category — hiện tại trả về `(0 + alpha * prior) / (0 + alpha) = prior` đúng về toán học, nhưng tôi thấy một số category bị NaN. Kiểm tra xem có trường hợp `self.prior` là None khi gọi Transform trước FitTransform không, thêm guard check và raise lỗi rõ ràng nếu chưa fit."
+
+---
+
+**Prompt 5:**
+> "Khi train `OrderedBoostingClassifier` với dataset lớn, bước vòng lặp `for position in range(n_samples)` rất chậm vì Python for loop. Tôi không muốn thay đổi thuật toán, chỉ muốn debug xem bottleneck ở đâu. Thêm timing log cho từng bước trong `Fit()` (encode, mỗi iteration boosting, total) để tôi biết chỗ nào cần tối ưu trước."
+
+---
+
+**Prompt 6:**
+> "Notebook `04_train_model.ipynb` báo lỗi `ModuleNotFoundError: No module named 'catboost_scratch'` dù package đã có trong `src/`. Sửa bằng cách thêm `sys.path.insert(0, os.path.abspath('src'))` ở đầu notebook trước các import, giống như TrainModel.py đang làm."
+
+---
+
+**Prompt 7:**
+> "Hàm `clean_raw_data` khi gọi với `drop_customer_id=False` để resolve duplicate, nhưng sau đó notebook 01 quên drop customerID trước khi split — customerID lọt vào tập train làm feature. Thêm assert sau bước resolve: `assert 'customerID' not in df.columns` hoặc tự động drop và in warning."
+
+---
+
+**Prompt 8:**
+> "Kết quả `scale_pos_weight` tính được là 3.12 thay vì ~2.7685 như mong đợi. Debug bằng cách in `y_train.value_counts()` sau mỗi bước: sau `clean_raw_data`, sau `stratified_split`, sau `transform` — tìm xem bước nào làm lệch tỷ lệ class so với dự kiến."
+
+---
+
+## A.1.3 Prompt cải thiện và tối ưu mã nguồn
+
+**Prompt 1:**
+> "Thêm tham số `max_borders=32` vào `ObliviousTree` để giới hạn số threshold cần duyệt khi cột có nhiều giá trị unique. Thay vì dùng tất cả midpoint, dùng quantiles: `np.quantile(sort_value, np.linspace(0,1,max_borders+2)[1:-1])` rồi unique. Điều này giúp tăng tốc train đáng kể trên dữ liệu có nhiều giá trị liên tục."
+
+---
+
+**Prompt 2:**
+> "Thêm tham số `pos_weight='balanced'` cho `CatBoostClassifier`. Khi pos_weight='balanced', tự tính `computed_weight = n_neg / n_pos` từ y_train trong `Fit()`. Trong `OrderedBoostingClassifier.Fit()`, nhân gradient của sample có y_train==1 lên `pos_weight` lần trước khi fit cây — giúp model chú ý hơn vào class minority Churn=Yes."
+
+---
+
+**Prompt 3:**
+> "Refactor `src/preprocessing.py`: tách các hằng số mapping (`_BOOLEAN_MAP`, `_GENDER_MAP`, `_CONTRACT_MAP`, `_PAYMENT_MAP`, `_EXPLICIT_COL_MAPS`, `_PRESERVE_LABELS`, `_MISSING_PLACEHOLDERS`, `_TARGET_MAP`, `_NUMERIC_BOUNDS`, `_SENIOR_MAP`) lên đầu file ở cấp module — định nghĩa một lần, dùng chung cho tất cả hàm. Thêm docstring cho mỗi hằng số giải thích lý do chọn ngưỡng (ví dụ max=150 cho MonthlyCharges vì max thực tế ~118.75 cộng biên độ dư 25%)."
+
+---
+
+**Prompt 4:**
+> "Thêm block `if __name__ == '__main__':` vào `src/preprocessing.py` để tự kiểm thử: load `data/raw/Telco_Customer_Churn.csv` → chạy toàn bộ pipeline → assert SeniorCitizen dtype là numeric, gender chỉ còn Male/Female, Contract chỉ còn 3 nhãn chuẩn, TotalCharges không còn NaN, tenure max <= 100. Nếu train_raw.csv tồn tại thì thêm test fit/transform với assert 0 NaN trong X[num_cols]."
+
+---
+
+**Prompt 5:**
+> "Cải thiện `_invalidate_impossible_numeric_values`: thay vì hardcode bounds trong hàm, đọc từ dict `_NUMERIC_BOUNDS` được định nghĩa ở cấp module. Dict này cần có cả `min` và `max` key, với `None` nghĩa là không có chặn. In log chi tiết: tên cột, số dòng bị invalidate, khoảng hợp lệ, min/max sau khi lọc."
+
+---
+
+**Prompt 6:**
+> "Tối ưu `Visualize.py`: thay vì vẽ 5 biểu đồ riêng lẻ (5 plt.show()), gom tất cả vào 1 figure dạng subplot 2×3 để dễ so sánh. Lưu figure tổng hợp vào `reports/figures/model_evaluation_summary.png` với DPI=150, bbox_inches='tight'."
+
+---
+
+**Prompt 7:**
+> "Thêm type hints đầy đủ vào tất cả hàm trong `preprocessing.py` (dùng typing: Dict, List, Optional, Tuple). Thêm docstring ngắn cho mỗi hàm public mô tả: input, output, side effects. Đặc biệt ghi rõ hàm nào là fit-only (chỉ dùng trên train) và hàm nào là stateless transform (dùng được trên cả val/test)."
+
+---
+
+**Prompt 8:**
+> "Trong notebook `04_train_model.ipynb` phần đánh giá: thay vì chỉ dùng threshold=0.5, vẽ thêm đường cong F1-score theo threshold từ 0.3 đến 0.8 (bước 0.05) để tìm threshold tối ưu cho bài toán churn — thường recall quan trọng hơn precision nên threshold tối ưu thường < 0.5. Tự cài bằng NumPy, không dùng sklearn."
+
+---
+
+> **Lưu ý sử dụng:**
+> - Dataset gốc: tải từ Kaggle "Telco Customer Churn" (IBM Watson), đặt vào `data/raw/Telco_Customer_Churn.csv`.
+> - Thứ tự chạy: Prompt xây dựng 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10.
+> - Sau Prompt 3 (notebook 01_split), cần **thực thi notebook** để tạo ra `train_raw.csv` và `test_raw.csv` trước khi chạy Prompt 5.
+> - Prompt 6 (catboost_scratch package) cần hoàn chỉnh trước khi chạy Prompt 7 (notebook 04_train_model).
+> - Các prompt debug/cải thiện áp dụng **sau khi đã có code chạy được** từ phần A.1.1.
